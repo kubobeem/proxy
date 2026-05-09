@@ -1,72 +1,108 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const cors = require('cors');
+const { parse } = require('node-html-parser');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORSを全部許可するよ。これがないとブラウザが怒るからね。
 app.use(cors());
 
-// 初心者へのメモ：ここでプロキシの設定をしているんだ。
-// /proxy/https://example.com みたいにアクセスすると、ターゲットのサイトに化けてくれるよ。
-app.use('/proxy', (req, res, next) => {
-    // パスの先頭のスラッシュを削ってターゲットURLを取り出すよ
-    const targetUrl = req.url.startsWith('/') ? req.url.slice(1) : req.url;
-    
-    if (!targetUrl || !targetUrl.startsWith('http')) {
-        return res.status(400).send('URLが正しくないよ。httpから入れてね。例: /proxy/https://google.com');
+// 初心者へのメモ：URLを書き換えるための魔法の関数だよ。
+function rewriteUrls(html, proxyHost, targetOrigin) {
+    const root = parse(html);
+    const proxyPrefix = `https://${proxyHost}/proxy/`;
+
+    // aタグのリンク、imgタグの画像、linkタグのCSS、scriptタグのJSを全部書き換える！
+    const tags = {
+        'a': 'href',
+        'img': 'src',
+        'link': 'href',
+        'script': 'src',
+        'form': 'action',
+        'iframe': 'src'
+    };
+
+    for (const [tag, attr] of Object.entries(tags)) {
+        root.querySelectorAll(tag).forEach(el => {
+            const originalVal = el.getAttribute(attr);
+            if (originalVal && !originalVal.startsWith('javascript:') && !originalVal.startsWith('#')) {
+                try {
+                    // 相対パスを絶対パスに直してから、プロキシのURLをくっつけるんだ。
+                    const absoluteUrl = new URL(originalVal, targetOrigin).href;
+                    el.setAttribute(attr, proxyPrefix + absoluteUrl);
+                } catch (e) {
+                    // URLが変な時は無視するよ
+                }
+            }
+        });
     }
 
-    console.log(`[Proxy] Target: ${targetUrl}`);
+    return root.toString();
+}
+
+app.use('/proxy/:targetUrl(*)', async (req, res, next) => {
+    const targetUrl = req.params.targetUrl;
+    if (!targetUrl || !targetUrl.startsWith('http')) {
+        return res.status(400).send('URLがおかしいよ。');
+    }
+
+    const targetOrigin = new URL(targetUrl).origin;
 
     const proxy = createProxyMiddleware({
         target: targetUrl,
         changeOrigin: true,
         secure: false,
         ws: true,
-        followRedirects: false, // 勝手にリダイレクトさせない。僕がコントロールする！
-        pathRewrite: (path) => '',
-        onProxyRes: function (proxyRes, req, res) {
-            // 1. リダイレクト(301, 302等)のLocationヘッダーを書き換える
-            // 初心者へのメモ：相手が「あっちに行け」と言ってきたら、
-            // 「あっち（プロキシ経由）」に行くように行き先を書き換えてあげるんだ。
-            if (proxyRes.headers['location']) {
-                const originalLocation = proxyRes.headers['location'];
-                try {
-                    const absoluteLocation = new URL(originalLocation, targetUrl).href;
-                    proxyRes.headers['location'] = `${req.protocol}://${req.get('host')}/proxy/${absoluteLocation}`;
-                } catch (e) {
-                    // URLが変な時はそのままにしておくよ
-                }
-            }
+        followRedirects: false,
+        selfHandleResponse: true, // これをtrueにすると、中身を自分でいじれるようになるんだ。
+        onProxyRes: async function (proxyRes, req, res) {
+            const bodyChunks = [];
+            proxyRes.on('data', chunk => bodyChunks.push(chunk));
+            proxyRes.on('end', () => {
+                const body = Buffer.concat(bodyChunks);
+                const contentType = proxyRes.headers['content-type'] || '';
 
-            // 2. セキュリティヘッダーを徹底的に剥ぎ取る
-            delete proxyRes.headers['x-frame-options'];
-            delete proxyRes.headers['content-security-policy'];
-            delete proxyRes.headers['content-security-policy-report-only'];
-            delete proxyRes.headers['x-content-type-options'];
-            proxyRes.headers['access-control-allow-origin'] = '*';
-            proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+                // リダイレクトの処理
+                if ([301, 302, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers['location']) {
+                    const originalLocation = proxyRes.headers['location'];
+                    const absoluteLocation = new URL(originalLocation, targetUrl).href;
+                    res.redirect(`https://${req.get('host')}/proxy/${absoluteLocation}`);
+                    return;
+                }
+
+                // HTMLの場合は中身を書き換える！
+                if (contentType.includes('text/html')) {
+                    const html = body.toString();
+                    const rewrittenHtml = rewriteUrls(html, req.get('host'), targetOrigin);
+                    
+                    // 書き換えた中身をブラウザに返すよ。
+                    res.set('Content-Type', 'text/html');
+                    res.send(rewrittenHtml);
+                } else {
+                    // HTML以外（画像とか）はそのまま返す。
+                    res.set(proxyRes.headers);
+                    res.send(body);
+                }
+            });
         },
         onError: (err, req, res) => {
-            res.status(500).send('プロキシ中にエラーが起きちゃった。: ' + err.message);
+            res.status(500).send('エラーだよ: ' + err.message);
         }
     });
 
     proxy(req, res, next);
 });
 
-// ルートへのアクセスには簡単な案内を表示するよ。
 app.get('/', (req, res) => {
     res.send(`
-        <h1>本格プロキシサーバー 稼働中</h1>
-        <p>使いかた: /proxy/https://google.com みたいにアクセスしてね。</p>
-        <p>Renderで動いてるなんて、ちょっとプロっぽいでしょ？</p>
+        <body style="background:#000;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+            <h1>𝕏-Startpage Proxy</h1>
+            <p>どんなサイトもプロキシの中に閉じ込めてあげるよ。</p>
+            <input type="text" id="url" placeholder="https://example.com" style="width:400px;padding:10px;border-radius:20px;border:none;">
+            <button onclick="location.href='/proxy/'+document.getElementById('url').value" style="margin-top:20px;padding:10px 30px;border-radius:20px;border:none;background:#1d9bf0;color:#fff;cursor:pointer;">Anonymous View</button>
+        </body>
     `);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    console.log(`Try: http://localhost:${PORT}/proxy/https://example.com`);
-});
+app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
