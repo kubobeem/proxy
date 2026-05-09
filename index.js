@@ -8,20 +8,53 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// 初心者へのメモ：URLを書き換えるための魔法の関数だよ。
+// 初心者へのメモ：このJSをページに埋め込むことで、
+// Xのプログラムが「こっそり裏で通信しようとするの」を捕まえて、
+// 全部プロキシ経由に変えさせちゃうんだ。これをモンキーパッチって呼ぶよ。
+const INJECT_SCRIPT = (proxyHost) => `
+<script>
+(function() {
+    const PROXY_URL = 'https://${proxyHost}/proxy/';
+    const originalFetch = window.fetch;
+    window.fetch = function() {
+        if (arguments[0] && typeof arguments[0] === 'string' && !arguments[0].startsWith('http') && !arguments[0].startsWith(PROXY_URL)) {
+            arguments[0] = PROXY_URL + new URL(arguments[0], window.location.href).href;
+        } else if (arguments[0] && typeof arguments[0] === 'string' && arguments[0].startsWith('http') && !arguments[0].startsWith(PROXY_URL)) {
+             arguments[0] = PROXY_URL + arguments[0];
+        }
+        return originalFetch.apply(this, arguments);
+    };
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function() {
+        let url = arguments[1];
+        if (url && typeof url === 'string' && !url.startsWith('http') && !url.startsWith(PROXY_URL)) {
+            arguments[1] = PROXY_URL + new URL(url, window.location.href).href;
+        } else if (url && typeof url === 'string' && url.startsWith('http') && !url.startsWith(PROXY_URL)) {
+            arguments[1] = PROXY_URL + url;
+        }
+        return originalOpen.apply(this, arguments);
+    };
+    console.log('𝕏-Proxy: Communications intercepted.');
+})();
+</script>
+`;
+
 function rewriteUrls(html, proxyHost, targetOrigin) {
     const root = parse(html);
     const proxyPrefix = `https://${proxyHost}/proxy/`;
 
-    // aタグのリンク、imgタグの画像、linkタグのCSS、scriptタグのJSを全部書き換える！
+    // 最初にJSを注入する！
+    const head = root.querySelector('head');
+    if (head) {
+        head.insertAdjacentHTML('afterbegin', INJECT_SCRIPT(proxyHost));
+    }
+
     const tags = {
-        'a': 'href',
-        'img': 'src',
-        'link': 'href',
-        'script': 'src',
-        'form': 'action',
-        'iframe': 'src'
+        'a': 'href', 'img': 'src', 'link': 'href', 'script': 'src',
+        'form': 'action', 'iframe': 'src', 'source': 'src', 'video': 'src'
     };
+// ... (以下、既存のループ処理)
 
     for (const [tag, attr] of Object.entries(tags)) {
         root.querySelectorAll(tag).forEach(el => {
