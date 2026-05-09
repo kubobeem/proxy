@@ -25,19 +25,32 @@ app.use('/proxy', (req, res, next) => {
         changeOrigin: true,
         secure: false,
         ws: true,
-        // パス書き換えのルールをシンプルにするよ
-        pathRewrite: (path) => {
-            return ''; // ターゲットに対してはパスなしでリクエストを飛ばす（URLに全部含まれてるからね）
-        },
+        followRedirects: false, // 勝手にリダイレクトさせない。僕がコントロールする！
+        pathRewrite: (path) => '',
         onProxyRes: function (proxyRes, req, res) {
-            // セキュリティヘッダーを無理やり剥ぎ取るんだ。
-            // これで iframe の中にも表示されるようになる（はずだよ）。
+            // 1. リダイレクト(301, 302等)のLocationヘッダーを書き換える
+            // 初心者へのメモ：相手が「あっちに行け」と言ってきたら、
+            // 「あっち（プロキシ経由）」に行くように行き先を書き換えてあげるんだ。
+            if (proxyRes.headers['location']) {
+                const originalLocation = proxyRes.headers['location'];
+                try {
+                    const absoluteLocation = new URL(originalLocation, targetUrl).href;
+                    proxyRes.headers['location'] = `${req.protocol}://${req.get('host')}/proxy/${absoluteLocation}`;
+                } catch (e) {
+                    // URLが変な時はそのままにしておくよ
+                }
+            }
+
+            // 2. セキュリティヘッダーを徹底的に剥ぎ取る
             delete proxyRes.headers['x-frame-options'];
             delete proxyRes.headers['content-security-policy'];
+            delete proxyRes.headers['content-security-policy-report-only'];
+            delete proxyRes.headers['x-content-type-options'];
             proxyRes.headers['access-control-allow-origin'] = '*';
+            proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
         },
         onError: (err, req, res) => {
-            res.status(500).send('プロキシ中にエラーが起きちゃった。ごめんね。: ' + err.message);
+            res.status(500).send('プロキシ中にエラーが起きちゃった。: ' + err.message);
         }
     });
 
