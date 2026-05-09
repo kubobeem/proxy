@@ -10,23 +10,24 @@ app.use(cors());
 
 // 初心者へのメモ：ここでプロキシの設定をしているんだ。
 // /proxy/https://example.com みたいにアクセスすると、ターゲットのサイトに化けてくれるよ。
-app.use('/proxy/:targetUrl(*)', (req, res, next) => {
-    const targetUrl = req.params.targetUrl;
+app.use('/proxy', (req, res, next) => {
+    // パスの先頭のスラッシュを削ってターゲットURLを取り出すよ
+    const targetUrl = req.url.startsWith('/') ? req.url.slice(1) : req.url;
     
     if (!targetUrl || !targetUrl.startsWith('http')) {
-        return res.status(400).send('URLが正しくないよ。httpから入れてね。');
+        return res.status(400).send('URLが正しくないよ。httpから入れてね。例: /proxy/https://google.com');
     }
 
     console.log(`[Proxy] Target: ${targetUrl}`);
 
-    // http-proxy-middleware の魔法だよ。
     const proxy = createProxyMiddleware({
         target: targetUrl,
-        changeOrigin: true, // 相手のサイトに「僕は君の仲間だよ」と嘘をつく
-        secure: false,      // 証明書のエラーを無視する（お行儀は悪いけど背に腹はかえられない）
-        ws: true,           // WebSocket対応。YouTubeの動画とかに必要かも
-        pathRewrite: {
-            [`^/proxy/${targetUrl}`]: '', // 余計なパスを削る
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+        // パス書き換えのルールをシンプルにするよ
+        pathRewrite: (path) => {
+            return ''; // ターゲットに対してはパスなしでリクエストを飛ばす（URLに全部含まれてるからね）
         },
         onProxyRes: function (proxyRes, req, res) {
             // セキュリティヘッダーを無理やり剥ぎ取るんだ。
