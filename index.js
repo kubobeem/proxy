@@ -54,7 +54,6 @@ function rewriteUrls(html, proxyHost, targetOrigin) {
         'a': 'href', 'img': 'src', 'link': 'href', 'script': 'src',
         'form': 'action', 'iframe': 'src', 'source': 'src', 'video': 'src'
     };
-// ... (以下、既存のループ処理)
 
     for (const [tag, attr] of Object.entries(tags)) {
         root.querySelectorAll(tag).forEach(el => {
@@ -74,10 +73,12 @@ function rewriteUrls(html, proxyHost, targetOrigin) {
     return root.toString();
 }
 
-app.use('/proxy/:targetUrl(*)', async (req, res, next) => {
-    const targetUrl = req.params.targetUrl;
+// ルート設定を修正（最新のExpress/path-to-regexpに対応）
+app.use('/proxy', async (req, res, next) => {
+    const targetUrl = req.url.startsWith('/') ? req.url.slice(1) : req.url;
+    
     if (!targetUrl || !targetUrl.startsWith('http')) {
-        return res.status(400).send('URLがおかしいよ。');
+        return res.status(400).send('URLがおかしいよ。例: /proxy/https://x.com');
     }
 
     const targetOrigin = new URL(targetUrl).origin;
@@ -88,7 +89,7 @@ app.use('/proxy/:targetUrl(*)', async (req, res, next) => {
         secure: false,
         ws: true,
         followRedirects: false,
-        selfHandleResponse: true, // これをtrueにすると、中身を自分でいじれるようになるんだ。
+        selfHandleResponse: true, 
         onProxyRes: async function (proxyRes, req, res) {
             const bodyChunks = [];
             proxyRes.on('data', chunk => bodyChunks.push(chunk));
@@ -99,8 +100,13 @@ app.use('/proxy/:targetUrl(*)', async (req, res, next) => {
                 // リダイレクトの処理
                 if ([301, 302, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers['location']) {
                     const originalLocation = proxyRes.headers['location'];
-                    const absoluteLocation = new URL(originalLocation, targetUrl).href;
-                    res.redirect(`https://${req.get('host')}/proxy/${absoluteLocation}`);
+                    try {
+                        const absoluteLocation = new URL(originalLocation, targetUrl).href;
+                        res.redirect(`https://${req.get('host')}/proxy/${absoluteLocation}`);
+                    } catch (e) {
+                        res.set(proxyRes.headers);
+                        res.send(body);
+                    }
                     return;
                 }
 
@@ -108,12 +114,9 @@ app.use('/proxy/:targetUrl(*)', async (req, res, next) => {
                 if (contentType.includes('text/html')) {
                     const html = body.toString();
                     const rewrittenHtml = rewriteUrls(html, req.get('host'), targetOrigin);
-                    
-                    // 書き換えた中身をブラウザに返すよ。
                     res.set('Content-Type', 'text/html');
                     res.send(rewrittenHtml);
                 } else {
-                    // HTML以外（画像とか）はそのまま返す。
                     res.set(proxyRes.headers);
                     res.send(body);
                 }
@@ -132,7 +135,7 @@ app.get('/', (req, res) => {
         <body style="background:#000;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
             <h1>𝕏-Startpage Proxy</h1>
             <p>どんなサイトもプロキシの中に閉じ込めてあげるよ。</p>
-            <input type="text" id="url" placeholder="https://example.com" style="width:400px;padding:10px;border-radius:20px;border:none;">
+            <input type="text" id="url" placeholder="https://x.com" style="width:400px;padding:10px;border-radius:20px;border:none;">
             <button onclick="location.href='/proxy/'+document.getElementById('url').value" style="margin-top:20px;padding:10px 30px;border-radius:20px;border:none;background:#1d9bf0;color:#fff;cursor:pointer;">Anonymous View</button>
         </body>
     `);
